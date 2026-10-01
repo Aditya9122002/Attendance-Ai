@@ -1,8 +1,9 @@
 import pytest
-from app.models import Guardian, School, Student, StudentGuardian
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Guardian, School, Student, StudentGuardian
 
 
 async def make_school(session: AsyncSession, name: str = "Demo School") -> School:

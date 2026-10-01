@@ -28,6 +28,7 @@ asyncio_mode = "auto"
 line-length = 100
 target-version = "py312"
 src = ["backend"]
+extend-exclude = ["backend/migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]

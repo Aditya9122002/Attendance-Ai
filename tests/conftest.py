@@ -1,6 +1,6 @@
-import app.models  # noqa: F401  (registers the tables on Base.metadata)
 import pytest_asyncio
 
+import app.models  # noqa: F401  (registers the tables on Base.metadata)
 from app.database import Base, create_engine, create_session_factory
 
 
