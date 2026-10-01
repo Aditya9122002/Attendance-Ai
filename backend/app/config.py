@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     gemini_api_key: SecretStr | None = None
+    database_url: str = "sqlite+aiosqlite:///./attendance.db"
 
 
 @lru_cache
