@@ -16,6 +16,7 @@ from app.attendance_service import (
     mark_attendance,
 )
 from app.dependencies import CurrentSchoolId, DbSession
+from app.extraction import AbsenceReason
 from app.models import AbsenceEventStatus, AttendanceStatus
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,9 @@ class DayEntryResponse(BaseModel):
     section: str
     status: AttendanceStatus | None
     event_status: AbsenceEventStatus | None
+    absence_reason: AbsenceReason | None
+    expected_return_date: date | None
+    needs_human_followup: bool | None
 
 
 def _to_response(result: MarkResult) -> AttendanceResponse:
@@ -117,6 +121,9 @@ async def get_attendance_for_day(
             section=e.section,
             status=AttendanceStatus(e.status) if e.status else None,
             event_status=AbsenceEventStatus(e.event_status) if e.event_status else None,
+            absence_reason=AbsenceReason(e.absence_reason) if e.absence_reason else None,
+            expected_return_date=e.expected_return_date,
+            needs_human_followup=e.needs_human_followup,
         )
         for e in entries
     ]

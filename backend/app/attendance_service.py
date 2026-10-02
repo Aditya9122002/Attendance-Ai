@@ -17,11 +17,12 @@ Rules:
 
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.extraction import Extraction
 from app.models import (
     AbsenceEvent,
     AbsenceEventStatus,
@@ -87,6 +88,44 @@ async def try_start_dialing(session: AsyncSession, event_id: uuid.UUID) -> bool:
     """Claim a pending event for dialing. Returns False if it was cancelled or already claimed."""
     return await _transition(
         session, event_id, source=AbsenceEventStatus.PENDING, target=AbsenceEventStatus.DIALING
+    )
+
+
+async def record_extraction(
+    session: AsyncSession, event_id: uuid.UUID, extraction: Extraction, prompt_version: str
+) -> bool:
+    """Save what the call learned. Only allowed while the call is in progress (dialing).
+
+    Returns False if the event is not dialing, so a late result can never change an event
+    that was already completed, failed or cancelled. Calling it again during the same call
+    overwrites the earlier values (a parent may correct themselves).
+    """
+    result = await session.execute(
+        update(AbsenceEvent)
+        .where(AbsenceEvent.id == event_id, AbsenceEvent.status == AbsenceEventStatus.DIALING)
+        .values(
+            reason=extraction.reason.value,
+            expected_return_date=extraction.expected_return_date,
+            needs_human_followup=extraction.needs_human_followup,
+            extraction_prompt_version=prompt_version,
+            extracted_at=datetime.now(UTC),
+        )
+        .returning(AbsenceEvent.id)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def complete_event(session: AsyncSession, event_id: uuid.UUID) -> bool:
+    """The call finished and its result was saved. Only a dialing event can complete."""
+    return await _transition(
+        session, event_id, source=AbsenceEventStatus.DIALING, target=AbsenceEventStatus.COMPLETED
+    )
+
+
+async def fail_event(session: AsyncSession, event_id: uuid.UUID) -> bool:
+    """The call could not be completed. Only a dialing event can fail."""
+    return await _transition(
+        session, event_id, source=AbsenceEventStatus.DIALING, target=AbsenceEventStatus.FAILED
     )
 
 
@@ -199,6 +238,9 @@ class DayEntry:
     section: str
     status: str | None
     event_status: str | None
+    absence_reason: str | None
+    expected_return_date: date | None
+    needs_human_followup: bool | None
 
 
 async def list_attendance_for_day(
@@ -213,6 +255,9 @@ async def list_attendance_for_day(
             Student.section,
             AttendanceRecord.status,
             AbsenceEvent.status,
+            AbsenceEvent.reason,
+            AbsenceEvent.expected_return_date,
+            AbsenceEvent.needs_human_followup,
         )
         .outerjoin(
             AttendanceRecord,

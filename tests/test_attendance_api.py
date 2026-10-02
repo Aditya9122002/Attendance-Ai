@@ -2,6 +2,7 @@ import uuid
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.dependencies import get_session
@@ -132,3 +133,29 @@ async def test_day_list_includes_unmarked_students_and_only_this_school(
     assert entries["Asha Patil"]["event_status"] == "pending"
     assert entries["Zoya Khan"]["status"] is None
     assert entries["Zoya Khan"]["event_status"] is None
+
+
+async def test_day_list_shows_what_the_call_learned(client, session, school, student):
+    from datetime import date
+
+    from app.attendance_service import record_extraction, try_start_dialing
+    from app.extraction import AbsenceReason, Extraction
+    from app.models import AbsenceEvent
+
+    await put_status(client, school, student, "absent")
+    event_id = await session.scalar(select(AbsenceEvent.id))
+    await try_start_dialing(session, event_id)
+    extraction = Extraction(
+        reason=AbsenceReason.ILLNESS,
+        expected_return_date=date(2026, 10, 5),
+        needs_human_followup=True,
+        confidence=0.9,
+    )
+    await record_extraction(session, event_id, extraction, "v2")
+
+    response = await client.get(f"/attendance/{DAY}", headers=headers(school))
+    entry = response.json()[0]
+    assert entry["event_status"] == "dialing"
+    assert entry["absence_reason"] == "illness"
+    assert entry["expected_return_date"] == "2026-10-05"
+    assert entry["needs_human_followup"] is True

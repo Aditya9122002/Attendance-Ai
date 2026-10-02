@@ -12,11 +12,13 @@ from sqlalchemy import (
     Index,
     String,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+from app.extraction import AbsenceReason
 
 
 class AttendanceStatus(StrEnum):
@@ -140,6 +142,8 @@ class AbsenceEvent(Base):
             ["attendance_records.school_id", "attendance_records.id"],
         ),
         CheckConstraint(_in_values("status", AbsenceEventStatus), name="status_valid"),
+        # A NULL reason passes this check, which is what we want before the call has happened.
+        CheckConstraint(_in_values("reason", AbsenceReason), name="reason_valid"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -149,4 +153,11 @@ class AbsenceEvent(Base):
         String(16), default=AbsenceEventStatus.PENDING.value, index=True
     )
     correction_notice_owed: Mapped[bool] = mapped_column(default=False)
+    # What the call learned. Only the extracted category and date are kept, never the
+    # parent's words. All empty until the conversation has produced an extraction.
+    reason: Mapped[str | None] = mapped_column(String(16), default=None)
+    expected_return_date: Mapped[date | None] = mapped_column(default=None)
+    needs_human_followup: Mapped[bool] = mapped_column(default=False, server_default=false())
+    extraction_prompt_version: Mapped[str | None] = mapped_column(String(16), default=None)
+    extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

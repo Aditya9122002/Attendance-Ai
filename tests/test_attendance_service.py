@@ -5,7 +5,15 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from app.attendance_service import StudentNotFoundError, mark_attendance, try_start_dialing
+from app.attendance_service import (
+    StudentNotFoundError,
+    complete_event,
+    fail_event,
+    mark_attendance,
+    record_extraction,
+    try_start_dialing,
+)
+from app.extraction import AbsenceReason, Extraction
 from app.models import (
     AbsenceEvent,
     AbsenceEventStatus,
@@ -131,5 +139,83 @@ async def test_database_rejects_an_unknown_status(session, school, student):
             school_id=school.id, student_id=student.id, attendance_date=DAY, status="maybe"
         )
     )
+    with pytest.raises(IntegrityError):
+        await session.flush()
+
+
+def sample_extraction(**overrides) -> Extraction:
+    data = {
+        "reason": AbsenceReason.ILLNESS,
+        "expected_return_date": date(2026, 10, 5),
+        "needs_human_followup": False,
+        "confidence": 0.9,
+    }
+    data.update(overrides)
+    return Extraction(**data)
+
+
+async def start_call(session, school, student):
+    marked = await mark_attendance(session, school.id, student.id, DAY, AttendanceStatus.ABSENT)
+    assert await try_start_dialing(session, marked.event.id) is True
+    return marked.event
+
+
+async def test_extraction_is_saved_while_the_call_is_in_progress(session, school, student):
+    event = await start_call(session, school, student)
+    assert await record_extraction(session, event.id, sample_extraction(), "v2") is True
+    await session.refresh(event)
+    assert event.reason == "illness"
+    assert event.expected_return_date == date(2026, 10, 5)
+    assert event.needs_human_followup is False
+    assert event.extraction_prompt_version == "v2"
+    assert event.extracted_at is not None
+
+
+async def test_extraction_is_refused_before_the_call_starts(session, school, student):
+    marked = await mark_attendance(session, school.id, student.id, DAY, AttendanceStatus.ABSENT)
+    assert await record_extraction(session, marked.event.id, sample_extraction(), "v2") is False
+    await session.refresh(marked.event)
+    assert marked.event.reason is None
+
+
+async def test_extraction_is_refused_after_the_call_completed(session, school, student):
+    event = await start_call(session, school, student)
+    assert await complete_event(session, event.id) is True
+    assert await record_extraction(session, event.id, sample_extraction(), "v2") is False
+
+
+async def test_a_parent_correcting_themselves_overwrites_the_earlier_result(
+    session, school, student
+):
+    event = await start_call(session, school, student)
+    await record_extraction(session, event.id, sample_extraction(), "v2")
+    await record_extraction(
+        session,
+        event.id,
+        sample_extraction(reason=AbsenceReason.TRAVEL, expected_return_date=None),
+        "v2",
+    )
+    await session.refresh(event)
+    assert event.reason == "travel"
+    assert event.expected_return_date is None
+
+
+async def test_only_a_dialing_event_can_complete_or_fail(session, school, student):
+    marked = await mark_attendance(session, school.id, student.id, DAY, AttendanceStatus.ABSENT)
+    assert await complete_event(session, marked.event.id) is False
+    assert await fail_event(session, marked.event.id) is False
+    await try_start_dialing(session, marked.event.id)
+    assert await fail_event(session, marked.event.id) is True
+    assert await complete_event(session, marked.event.id) is False
+
+
+async def test_event_table_stores_no_transcript_or_reply_text():
+    names = {c.name for c in AbsenceEvent.__table__.columns}
+    assert not {n for n in names if "transcript" in n or "reply" in n or "text" in n}
+
+
+async def test_database_rejects_an_unknown_reason(session, school, student):
+    event = await start_call(session, school, student)
+    event.reason = "aliens"
     with pytest.raises(IntegrityError):
         await session.flush()
