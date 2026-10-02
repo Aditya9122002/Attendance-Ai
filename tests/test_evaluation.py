@@ -14,7 +14,9 @@ from app.extraction import AbsenceReason, extract_absence_reply
 from app.llm.base import LlmError
 from app.llm.fake import ScriptedLlmClient
 
-DATASET = Path(__file__).resolve().parents[1] / "evals" / "absence_replies.jsonl"
+EVALS = Path(__file__).resolve().parents[1] / "evals"
+DATASET = EVALS / "absence_replies.jsonl"
+HOLDOUT = EVALS / "absence_replies_holdout.jsonl"
 DEVANAGARI = re.compile(r"[\u0900-\u097F]")
 
 
@@ -82,3 +84,16 @@ def test_percentile_uses_nearest_rank():
     assert percentile(values, 95) == 95.0
     assert percentile(values, 50) == 50.0
     assert percentile([], 95) is None
+
+
+async def test_holdout_is_well_formed_and_separate_from_the_tuning_set():
+    main, holdout = load_cases(DATASET), load_cases(HOLDOUT)
+    assert len(holdout) >= 12
+    assert len({c.id for c in holdout}) == len(holdout)
+    assert not {c.id for c in main} & {c.id for c in holdout}
+    assert not {c.reply for c in main} & {c.reply for c in holdout}
+    assert all(
+        c.expected_return_date is None or c.expected_return_date >= EVAL_TODAY for c in holdout
+    )
+    summary = summarize(await run(OracleLlmClient(holdout), holdout))
+    assert summary.all_correct_rate == 1.0

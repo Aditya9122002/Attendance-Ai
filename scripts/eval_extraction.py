@@ -28,10 +28,13 @@ from app.evaluation import (  # noqa: E402
     load_cases,
     summarize,
 )
-from app.extraction import extract_absence_reply  # noqa: E402
+from app.extraction import PROMPT_VERSION, extract_absence_reply  # noqa: E402
 from app.llm.gemini import GeminiClient  # noqa: E402
 
-DATASET = ROOT / "evals" / "absence_replies.jsonl"
+DATASETS = {
+    "main": ROOT / "evals" / "absence_replies.jsonl",
+    "holdout": ROOT / "evals" / "absence_replies_holdout.jsonl",
+}
 RESULTS_DIR = ROOT / "evals" / "results"
 UNAVAILABLE_RETRIES = 2
 
@@ -40,8 +43,8 @@ def pct(value: float | None) -> str:
     return "n/a" if value is None else f"{value * 100:.0f}%"
 
 
-def print_summary(model: str, s: Summary) -> None:
-    print(f"\n=== {model} ===")
+def print_summary(model: str, dataset: str, s: Summary) -> None:
+    print(f"\n=== {model} | prompt {PROMPT_VERSION} | dataset {dataset} ===")
     print(f"cases: {s.total}  scored: {s.scored}  provider-unavailable: {s.unavailable}")
     print(f"all fields correct: {pct(s.all_correct_rate)}")
     print(
@@ -85,10 +88,16 @@ async def main() -> int:
     parser.add_argument("--model", help="Gemini model id (default: GEMINI_MODEL setting)")
     parser.add_argument("--delay", type=float, default=4.0, help="seconds between calls")
     parser.add_argument("--limit", type=int, help="only run the first N cases")
+    parser.add_argument(
+        "--dataset",
+        choices=sorted(DATASETS),
+        default="main",
+        help="main is for tuning; holdout is run rarely, to check we did not just memorize main",
+    )
     parser.add_argument("--dry-run", action="store_true", help="use a perfect fake model")
     args = parser.parse_args()
 
-    cases = load_cases(DATASET)[: args.limit]
+    cases = load_cases(DATASETS[args.dataset])[: args.limit]
     settings = get_settings()
     model = args.model or settings.gemini_model
 
@@ -114,17 +123,19 @@ async def main() -> int:
         await asyncio.sleep(delay)
 
     summary = summarize(results)
-    print_summary(model, summary)
+    print_summary(model, args.dataset, summary)
     print_failures(results)
 
     if not args.dry_run:
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        out = RESULTS_DIR / f"{model}-{stamp}.json"
+        out = RESULTS_DIR / f"{model}-{PROMPT_VERSION}-{args.dataset}-{stamp}.json"
         out.write_text(
             json.dumps(
                 {
                     "model": model,
+                    "prompt_version": PROMPT_VERSION,
+                    "dataset": args.dataset,
                     "summary": summary.__dict__,
                     "cases": [
                         {
