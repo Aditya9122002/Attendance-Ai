@@ -189,3 +189,39 @@ async def _transition(
         .returning(AbsenceEvent.id)
     )
     return result.scalar_one_or_none() is not None
+
+
+@dataclass(frozen=True)
+class DayEntry:
+    student_id: uuid.UUID
+    student_name: str
+    class_name: str
+    section: str
+    status: str | None
+    event_status: str | None
+
+
+async def list_attendance_for_day(
+    session: AsyncSession, school_id: uuid.UUID, day: date
+) -> list[DayEntry]:
+    """Every student of the school with their status and event status for the day."""
+    rows = await session.execute(
+        select(
+            Student.id,
+            Student.name,
+            Student.class_name,
+            Student.section,
+            AttendanceRecord.status,
+            AbsenceEvent.status,
+        )
+        .outerjoin(
+            AttendanceRecord,
+            (AttendanceRecord.school_id == Student.school_id)
+            & (AttendanceRecord.student_id == Student.id)
+            & (AttendanceRecord.attendance_date == day),
+        )
+        .outerjoin(AbsenceEvent, AbsenceEvent.attendance_record_id == AttendanceRecord.id)
+        .where(Student.school_id == school_id)
+        .order_by(Student.class_name, Student.section, Student.name)
+    )
+    return [DayEntry(*row) for row in rows]
