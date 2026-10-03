@@ -13,6 +13,7 @@ from app.conversation import (
     Outcome,
     Step,
     decide,
+    end_for_technical_problem,
     opening,
     result_to_store,
 )
@@ -130,6 +131,7 @@ def test_every_phrase_that_can_be_spoken_before_confirmation_has_no_child_name()
         "close_escalated",
         "close_emergency",
         "close_incomplete",
+        "close_technical",
         "question_prefix",
     ]
     for key in pre_confirmation:
@@ -266,3 +268,12 @@ def test_every_step_and_intent_combination_is_handled():
         result = decide(state_at(step), analysis, CTX)
         assert result.say
         assert result.ended or result.state != state_at(step) or result.state.unclear_count > 0
+
+
+@pytest.mark.parametrize("step", ACTIVE_STEPS)
+def test_a_technical_problem_ends_the_call_without_saving_or_naming_the_child(step):
+    result = end_for_technical_problem(state_at(step), CTX)
+    assert result.ended
+    assert result.state.outcome == Outcome.INCOMPLETE
+    assert result_to_store(result.state) is None
+    assert "Asha" not in result.say

@@ -149,6 +149,9 @@ PHRASES: dict[str, dict[str, str]] = {
         "close_incomplete": (
             "Sorry, I'm having trouble understanding. We'll try again later. Goodbye."
         ),
+        "close_technical": (
+            "Sorry, we're having a technical problem. We'll try again later. Goodbye."
+        ),
         "reason_illness": "illness",
         "reason_family_event": "a family event",
         "reason_travel": "travel",
@@ -230,6 +233,11 @@ def _end(
         update={"step": Step.ENDED, "outcome": outcome, "escalation": escalation}
     )
     return TurnResult(state=ended, say=_say(ctx, key))
+
+
+def end_for_technical_problem(state: ConversationState, ctx: CallContext) -> TurnResult:
+    """End the call politely when the language model is unavailable. Nothing is guessed or saved."""
+    return _end(state, ctx, Outcome.INCOMPLETE, "close_technical")
 
 
 def _unclear(state: ConversationState, ctx: CallContext) -> TurnResult:
