@@ -68,7 +68,8 @@ child.
 including a correction to what the assistant read back.
   unclear: anything else, such as silence, noise, off-topic talk, or when you cannot tell.
 - If several apply, use this order: opt_out, wants_human, upset, wrong_person, call_later, then \
-yes, no, answer, unclear.
+yes, no, answer, unclear. One exception: a reply that disagrees AND gives the corrected reason \
+or date is answer, not no.
 - has_question: true only if the parent asks a question the assistant cannot answer, such as a \
 question about homework or fees. Do not count a question like "who is this?".
 - Never guess. When unsure, choose unclear.
@@ -86,10 +87,10 @@ def _build_user_message(step: Step, reply: str) -> str:
     return f"{QUESTION_ASKED[step]}\n<parent_reply>\n{cleaned}\n</parent_reply>"
 
 
-async def _classify(
-    llm: LlmClient, step: Step, reply: str, max_attempts: int
+async def classify_intent(
+    llm: LlmClient, step: Step, reply: str, max_attempts: int = 2
 ) -> tuple[IntentClassification | None, str | None]:
-    """Return (classification, None), (None, None) for unusable output, or (None, error)."""
+    """Classify one reply: (result, None), (None, None) if unusable, or (None, error)."""
     user_message = _build_user_message(step, reply)
     schema = IntentClassification.model_json_schema()
     for attempt in range(1, max_attempts + 1):
@@ -118,7 +119,7 @@ async def analyze_turn(
     if not reply.strip():
         return TurnAnalysis(Analysis(Intent.UNCLEAR))
 
-    classification, error = await _classify(llm, step, reply, max_attempts)
+    classification, error = await classify_intent(llm, step, reply, max_attempts)
     if error:
         return TurnAnalysis(None, error)
     if classification is None:
