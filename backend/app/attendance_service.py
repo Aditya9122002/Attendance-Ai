@@ -122,6 +122,23 @@ async def complete_event(session: AsyncSession, event_id: uuid.UUID) -> bool:
     )
 
 
+async def release_for_retry(session: AsyncSession, event_id: uuid.UUID) -> bool:
+    """Put an unfinished call back in the queue. Only a dialing event can be released."""
+    return await _transition(
+        session, event_id, source=AbsenceEventStatus.DIALING, target=AbsenceEventStatus.PENDING
+    )
+
+
+async def mark_needs_human(session: AsyncSession, event_id: uuid.UUID) -> bool:
+    """A person must follow up. Final. Only a dialing event can move here."""
+    return await _transition(
+        session,
+        event_id,
+        source=AbsenceEventStatus.DIALING,
+        target=AbsenceEventStatus.NEEDS_HUMAN,
+    )
+
+
 async def fail_event(session: AsyncSession, event_id: uuid.UUID) -> bool:
     """The call could not be completed. Only a dialing event can fail."""
     return await _transition(

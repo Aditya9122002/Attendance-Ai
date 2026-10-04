@@ -11,12 +11,14 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     String,
+    Text,
     UniqueConstraint,
     false,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.conversation import Outcome
 from app.database import Base
 from app.extraction import AbsenceReason
 
@@ -36,6 +38,16 @@ class AbsenceEventStatus(StrEnum):
     DIALING = "dialing"
     COMPLETED = "completed"
     FAILED = "failed"
+    # Final. A person must follow up: escalated, wrong person, opted out, or gave up after
+    # the allowed attempts. Technical failures use FAILED instead.
+    NEEDS_HUMAN = "needs_human"
+
+
+class CallAttemptStatus(StrEnum):
+    """Whether one phone call attempt is still going."""
+
+    IN_PROGRESS = "in_progress"
+    FINISHED = "finished"
 
 
 def _utcnow() -> datetime:
@@ -137,6 +149,8 @@ class AbsenceEvent(Base):
     __table_args__ = (
         # At most one event per attendance record, ever.
         UniqueConstraint("attendance_record_id"),
+        # Lets call_attempts reference (school_id, id) so an attempt can never cross schools.
+        UniqueConstraint("school_id", "id", name="uq_absence_events_school_id_id"),
         ForeignKeyConstraint(
             ["school_id", "attendance_record_id"],
             ["attendance_records.school_id", "attendance_records.id"],
@@ -161,3 +175,46 @@ class AbsenceEvent(Base):
     extraction_prompt_version: Mapped[str | None] = mapped_column(String(16), default=None)
     extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CallAttempt(Base):
+    """One phone call attempt for an absence event, with the conversation state between turns.
+
+    `state_json` holds a serialised ConversationState: only categories, dates and counters,
+    never the parent's words. `turn_count` is a version number: a turn is saved only if the
+    stored count is still the one that was read, so a replayed or overlapping turn changes
+    nothing.
+    """
+
+    __tablename__ = "call_attempts"
+    __table_args__ = (
+        UniqueConstraint("absence_event_id", "attempt_number"),
+        ForeignKeyConstraint(
+            ["school_id", "absence_event_id"],
+            ["absence_events.school_id", "absence_events.id"],
+        ),
+        # At most one call in progress per event.
+        Index(
+            "uq_call_attempts_one_in_progress",
+            "absence_event_id",
+            unique=True,
+            sqlite_where=text("status = 'in_progress'"),
+            postgresql_where=text("status = 'in_progress'"),
+        ),
+        CheckConstraint(_in_values("status", CallAttemptStatus), name="status_valid"),
+        # A NULL outcome passes this check, which is what we want while the call is going.
+        CheckConstraint(_in_values("outcome", Outcome), name="outcome_valid"),
+        CheckConstraint("attempt_number >= 1", name="attempt_number_positive"),
+        CheckConstraint("turn_count >= 0", name="turn_count_not_negative"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    school_id: Mapped[uuid.UUID]
+    absence_event_id: Mapped[uuid.UUID]
+    attempt_number: Mapped[int]
+    status: Mapped[str] = mapped_column(String(16), default=CallAttemptStatus.IN_PROGRESS.value)
+    state_json: Mapped[str] = mapped_column(Text)
+    turn_count: Mapped[int] = mapped_column(default=0, server_default="0")
+    outcome: Mapped[str | None] = mapped_column(String(16), default=None)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

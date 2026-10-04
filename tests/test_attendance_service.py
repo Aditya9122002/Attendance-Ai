@@ -10,7 +10,9 @@ from app.attendance_service import (
     complete_event,
     fail_event,
     mark_attendance,
+    mark_needs_human,
     record_extraction,
+    release_for_retry,
     try_start_dialing,
 )
 from app.extraction import AbsenceReason, Extraction
@@ -219,3 +221,29 @@ async def test_database_rejects_an_unknown_reason(session, school, student):
     event.reason = "aliens"
     with pytest.raises(IntegrityError):
         await session.flush()
+
+
+async def test_a_dialing_event_can_be_released_and_claimed_again(session, school, student):
+    event = await start_call(session, school, student)
+    assert await release_for_retry(session, event.id) is True
+    assert await try_start_dialing(session, event.id) is True
+
+
+async def test_only_a_dialing_event_can_be_released_or_marked_needs_human(session, school, student):
+    marked = await mark_attendance(session, school.id, student.id, DAY, AttendanceStatus.ABSENT)
+    assert await release_for_retry(session, marked.event.id) is False
+    assert await mark_needs_human(session, marked.event.id) is False
+    await try_start_dialing(session, marked.event.id)
+    assert await complete_event(session, marked.event.id) is True
+    assert await release_for_retry(session, marked.event.id) is False
+    assert await mark_needs_human(session, marked.event.id) is False
+
+
+async def test_needs_human_is_final(session, school, student):
+    event = await start_call(session, school, student)
+    assert await mark_needs_human(session, event.id) is True
+    assert event.status == AbsenceEventStatus.NEEDS_HUMAN
+    assert await try_start_dialing(session, event.id) is False
+    assert await release_for_retry(session, event.id) is False
+    assert await complete_event(session, event.id) is False
+    assert await fail_event(session, event.id) is False
