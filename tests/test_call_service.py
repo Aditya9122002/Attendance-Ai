@@ -1,10 +1,23 @@
+import json
+import uuid
 from datetime import date
 
-from sqlalchemy import func, select
+import pytest
+from sqlalchemy import delete, func, select, update
 
 from app.attendance_service import mark_attendance, release_for_retry
-from app.call_service import MAX_ATTEMPTS, StartResult, start_call
-from app.conversation import ConversationState, Step
+from app.call_service import (
+    MAX_ATTEMPTS,
+    AttemptNotFoundError,
+    CallDataError,
+    StartResult,
+    TurnConflictError,
+    handle_parent_reply,
+    start_call,
+)
+from app.conversation import ConversationState, Outcome, Step
+from app.llm.base import LlmError
+from app.llm.fake import ScriptedLlmClient
 from app.models import (
     AbsenceEvent,
     AbsenceEventStatus,
@@ -16,6 +29,7 @@ from app.models import (
 )
 
 DAY = date(2026, 10, 1)
+TODAY = date(2026, 10, 2)
 
 
 async def pending_event(session, school, student) -> AbsenceEvent:
@@ -127,8 +141,6 @@ async def test_an_unsupported_guardian_language_falls_back_to_english(session, s
 
 
 async def test_an_unknown_event_cannot_be_started(session, school, student):
-    import uuid
-
     started = await start_call(session, uuid.uuid4())
     assert started.result == StartResult.NOT_AVAILABLE
     assert started.call is None
@@ -236,3 +248,196 @@ async def test_the_attempt_limit_can_be_set_by_the_caller(session, school, stude
     started = await start_call(session, event.id, max_attempts=1)
 
     assert started.result == StartResult.TOO_MANY_ATTEMPTS
+
+
+# ---- handle_parent_reply -------------------------------------------------------------------
+
+
+def intent(name: str, has_question: bool = False) -> str:
+    return json.dumps({"intent": name, "has_question": has_question})
+
+
+def extraction(**overrides) -> str:
+    data = {
+        "reason": "illness",
+        "expected_return_date": "2026-10-05",
+        "needs_human_followup": False,
+        "confidence": 0.9,
+    }
+    data.update(overrides)
+    return json.dumps(data)
+
+
+async def call_in_progress(session, school, student):
+    event = await pending_event(session, school, student)
+    await link_guardian(session, school, student)
+    started = await start_call(session, event.id)
+    assert started.result == StartResult.STARTED
+    return event, started.call.attempt_id
+
+
+async def stored_state(session, attempt_id) -> ConversationState:
+    attempt = await session.get(CallAttempt, attempt_id)
+    return ConversationState.model_validate_json(attempt.state_json)
+
+
+async def test_a_reply_moves_the_call_on_and_saves_the_state(session, school, student):
+    _, attempt_id = await call_in_progress(session, school, student)
+
+    result = await handle_parent_reply(
+        session, attempt_id, "Yes speaking", ScriptedLlmClient(intent("yes")), TODAY
+    )
+
+    assert result.ended is False
+    assert result.outcome is None
+    assert "Asha" in result.say  # the child is named only after identity is confirmed
+    assert (await stored_state(session, attempt_id)).step == Step.REASON
+    attempt = await session.get(CallAttempt, attempt_id)
+    assert attempt.turn_count == 1
+    assert attempt.status == CallAttemptStatus.IN_PROGRESS
+    assert attempt.outcome is None
+
+
+async def test_a_whole_call_ends_completed_with_the_attempt_finished(session, school, student):
+    _, attempt_id = await call_in_progress(session, school, student)
+    llm = ScriptedLlmClient(
+        intent("yes"),  # identity
+        intent("answer"),  # reason
+        extraction(),
+        intent("yes"),  # confirm
+    )
+
+    first = await handle_parent_reply(session, attempt_id, "Yes", llm, TODAY)
+    second = await handle_parent_reply(session, attempt_id, "He has fever till Sunday", llm, TODAY)
+    third = await handle_parent_reply(session, attempt_id, "Yes that is right", llm, TODAY)
+
+    assert [first.ended, second.ended, third.ended] == [False, False, True]
+    assert third.outcome == Outcome.COMPLETED
+    attempt = await session.get(CallAttempt, attempt_id)
+    assert attempt.status == CallAttemptStatus.FINISHED
+    assert attempt.outcome == "completed"
+    assert attempt.ended_at is not None
+    assert attempt.turn_count == 3
+    saved = await stored_state(session, attempt_id)
+    assert saved.step == Step.ENDED
+    assert saved.extraction.reason == "illness"
+
+
+async def test_the_model_never_sees_a_school_guardian_or_student_name(session, school, student):
+    _, attempt_id = await call_in_progress(session, school, student)
+    llm = ScriptedLlmClient(intent("yes"), intent("answer"), extraction(), intent("yes"))
+
+    for reply in ("Yes", "He has fever", "Yes"):
+        await handle_parent_reply(session, attempt_id, reply, llm, TODAY)
+
+    sent = " ".join(call["system"] + call["user"] for call in llm.calls)
+    for name in ("Demo School", "Patil", "Asha"):
+        assert name not in sent
+
+
+async def test_an_opt_out_ends_the_call_as_opted_out(session, school, student):
+    _, attempt_id = await call_in_progress(session, school, student)
+
+    result = await handle_parent_reply(
+        session, attempt_id, "Do not call me again", ScriptedLlmClient(intent("opt_out")), TODAY
+    )
+
+    assert result.ended is True
+    assert result.outcome == Outcome.OPTED_OUT
+    attempt = await session.get(CallAttempt, attempt_id)
+    assert attempt.status == CallAttemptStatus.FINISHED
+    assert attempt.outcome == "opted_out"
+
+
+async def test_a_model_outage_ends_the_call_politely_as_incomplete(session, school, student):
+    _, attempt_id = await call_in_progress(session, school, student)
+
+    result = await handle_parent_reply(
+        session, attempt_id, "Yes", ScriptedLlmClient(LlmError("down")), TODAY
+    )
+
+    assert result.ended is True
+    assert result.outcome == Outcome.INCOMPLETE
+    assert "technical problem" in result.say
+    assert (await session.get(CallAttempt, attempt_id)).outcome == "incomplete"
+
+
+async def test_silence_repeats_the_question_without_calling_the_model(session, school, student):
+    _, attempt_id = await call_in_progress(session, school, student)
+    llm = ScriptedLlmClient()
+
+    result = await handle_parent_reply(session, attempt_id, "   ", llm, TODAY)
+
+    assert result.ended is False
+    assert llm.calls == []
+    saved = await stored_state(session, attempt_id)
+    assert saved.step == Step.IDENTITY
+    assert saved.unclear_count == 1
+    assert (await session.get(CallAttempt, attempt_id)).turn_count == 1
+
+
+async def test_an_unknown_attempt_is_reported(session, school, student):
+    with pytest.raises(AttemptNotFoundError):
+        await handle_parent_reply(session, uuid.uuid4(), "Yes", ScriptedLlmClient(), TODAY)
+
+
+async def test_a_reply_after_the_call_ended_is_refused_and_changes_nothing(
+    session, school, student
+):
+    _, attempt_id = await call_in_progress(session, school, student)
+    await handle_parent_reply(
+        session, attempt_id, "Stop", ScriptedLlmClient(intent("opt_out")), TODAY
+    )
+    before = (await session.get(CallAttempt, attempt_id)).state_json
+
+    with pytest.raises(TurnConflictError):
+        await handle_parent_reply(session, attempt_id, "Hello?", ScriptedLlmClient(), TODAY)
+
+    attempt = await session.get(CallAttempt, attempt_id)
+    assert attempt.state_json == before
+    assert attempt.turn_count == 1
+
+
+class RacingLlm(ScriptedLlmClient):
+    """While this turn waits for the model, another request applies a turn first."""
+
+    def __init__(self, session, attempt_id, *responses):
+        super().__init__(*responses)
+        self._session = session
+        self._attempt_id = attempt_id
+
+    async def generate_json(self, **kwargs):
+        await self._session.execute(
+            update(CallAttempt)
+            .where(CallAttempt.id == self._attempt_id)
+            .values(turn_count=CallAttempt.turn_count + 1)
+        )
+        return await super().generate_json(**kwargs)
+
+
+async def test_a_turn_that_lost_a_race_changes_nothing(session, school, student):
+    _, attempt_id = await call_in_progress(session, school, student)
+    initial = (await session.get(CallAttempt, attempt_id)).state_json
+    llm = RacingLlm(session, attempt_id, intent("yes"))
+
+    with pytest.raises(TurnConflictError):
+        await handle_parent_reply(session, attempt_id, "Yes", llm, TODAY)
+
+    attempt = await session.get(CallAttempt, attempt_id)
+    await session.refresh(attempt)
+    assert attempt.state_json == initial  # the loser wrote nothing
+    assert attempt.turn_count == 1  # only the other request's increment
+    assert attempt.status == CallAttemptStatus.IN_PROGRESS
+
+
+async def test_a_call_with_no_primary_guardian_cannot_continue(session, school, student):
+    _, attempt_id = await call_in_progress(session, school, student)
+    await session.execute(delete(StudentGuardian))
+    await session.flush()
+
+    with pytest.raises(CallDataError):
+        await handle_parent_reply(
+            session, attempt_id, "Yes", ScriptedLlmClient(intent("yes")), TODAY
+        )
+
+    assert (await session.get(CallAttempt, attempt_id)).turn_count == 0
