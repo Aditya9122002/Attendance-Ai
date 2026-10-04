@@ -18,7 +18,16 @@ Rules:
 - Only the student's first name is ever put in the conversation context.
 - A turn is saved with a compare-and-set on `turn_count`. The model is called BEFORE that
   write and no write happens first, so a replayed or overlapping turn changes nothing and a
-  crash mid-turn loses nothing. TurnConflictError means nothing was applied: roll back.
+  crash mid-turn loses nothing. After any exception the caller rolls back, which undoes
+  everything this call wrote, so the same reply can be applied again.
+- When a call ends, the attempt and the event are updated in the same transaction:
+  confirmed result      -> save the extraction, event completed
+  emergency             -> save the extraction, event needs_human
+  wants human, upset,
+  wrong person          -> event needs_human (nothing saved)
+  opt-out               -> guardian flagged opted_out, event needs_human
+  call later,
+  incomplete, outage    -> event back to pending, or needs_human once max_attempts is reached
 """
 
 import logging
@@ -30,7 +39,13 @@ from enum import StrEnum
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.attendance_service import mark_needs_human, try_start_dialing
+from app.attendance_service import (
+    complete_event,
+    mark_needs_human,
+    record_extraction,
+    release_for_retry,
+    try_start_dialing,
+)
 from app.conversation import (
     CallContext,
     ConversationState,
@@ -39,10 +54,13 @@ from app.conversation import (
     decide,
     end_for_technical_problem,
     opening,
+    result_to_store,
 )
+from app.extraction import PROMPT_VERSION
 from app.llm.base import LlmClient
 from app.models import (
     AbsenceEvent,
+    AbsenceEventStatus,
     AttendanceRecord,
     CallAttempt,
     CallAttemptStatus,
@@ -101,6 +119,7 @@ class ReplyResult:
     say: str  # the next line to speak
     ended: bool
     outcome: Outcome | None  # set once the call has ended
+    event_status: AbsenceEventStatus | None = None  # the event's new status once the call ended
 
 
 def _first_name(full_name: str) -> str:
@@ -196,11 +215,13 @@ async def handle_parent_reply(
     reply: str,
     llm: LlmClient,
     today: date,
+    *,
+    max_attempts: int = MAX_ATTEMPTS,
 ) -> ReplyResult:
     """Apply one parent reply to a call in progress and return the next line to speak.
 
-    Does not commit. Raises AttemptNotFoundError, TurnConflictError or CallDataError; after
-    any of them nothing has been changed.
+    Does not commit. Raises AttemptNotFoundError, TurnConflictError or CallDataError. Raise
+    means "do not keep anything": the caller must roll back.
     """
     attempt = await session.get(CallAttempt, attempt_id)
     if attempt is None:
@@ -258,4 +279,53 @@ async def handle_parent_reply(
             "step": new_state.step.value,
         },
     )
-    return ReplyResult(say=result.say, ended=result.ended, outcome=new_state.outcome)
+    event_status = None
+    if result.ended:
+        event_status = await _finish_event(session, attempt, new_state, guardian, max_attempts)
+        logger.info(
+            "call_ended",
+            extra={
+                "attempt_id": str(attempt_id),
+                "outcome": new_state.outcome.value if new_state.outcome else None,
+                "event_status": event_status.value,
+            },
+        )
+    return ReplyResult(
+        say=result.say, ended=result.ended, outcome=new_state.outcome, event_status=event_status
+    )
+
+
+async def _finish_event(
+    session: AsyncSession,
+    attempt: CallAttempt,
+    state: ConversationState,
+    guardian: Guardian,
+    max_attempts: int,
+) -> AbsenceEventStatus:
+    """Give the event its result after the call ended. Raises TurnConflictError on a mismatch."""
+    event_id = attempt.absence_event_id
+    outcome = state.outcome
+
+    confirmed_or_emergency = result_to_store(state)
+    if confirmed_or_emergency is not None and not await record_extraction(
+        session, event_id, confirmed_or_emergency, PROMPT_VERSION
+    ):
+        raise TurnConflictError("the event is no longer in progress")
+
+    retry_wanted = outcome in (Outcome.CALL_LATER, Outcome.INCOMPLETE)
+    if outcome == Outcome.COMPLETED:
+        target = AbsenceEventStatus.COMPLETED
+        moved = await complete_event(session, event_id)
+    elif retry_wanted and attempt.attempt_number < max_attempts:
+        target = AbsenceEventStatus.PENDING
+        moved = await release_for_retry(session, event_id)
+    else:
+        target = AbsenceEventStatus.NEEDS_HUMAN
+        moved = await mark_needs_human(session, event_id)
+    if not moved:
+        raise TurnConflictError("the event is no longer in progress")
+
+    if outcome == Outcome.OPTED_OUT:
+        guardian.opted_out = True
+        await session.flush()
+    return target

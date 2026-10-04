@@ -5,7 +5,7 @@ from datetime import date
 import pytest
 from sqlalchemy import delete, func, select, update
 
-from app.attendance_service import mark_attendance, release_for_retry
+from app.attendance_service import fail_event, mark_attendance, release_for_retry
 from app.call_service import (
     MAX_ATTEMPTS,
     AttemptNotFoundError,
@@ -25,6 +25,7 @@ from app.models import (
     CallAttempt,
     CallAttemptStatus,
     Guardian,
+    Student,
     StudentGuardian,
 )
 
@@ -441,3 +442,188 @@ async def test_a_call_with_no_primary_guardian_cannot_continue(session, school, 
         )
 
     assert (await session.get(CallAttempt, attempt_id)).turn_count == 0
+
+
+# ---- what a finished call does to the event ---------------------------------------------------
+
+
+async def run_confirmed_call(session, attempt_id):
+    llm = ScriptedLlmClient(intent("yes"), intent("answer"), extraction(), intent("yes"))
+    results = [
+        await handle_parent_reply(session, attempt_id, reply, llm, TODAY)
+        for reply in ("Yes", "He has fever till Sunday", "Yes that is right")
+    ]
+    return results
+
+
+async def test_nothing_is_saved_on_the_event_until_the_parent_confirms(session, school, student):
+    event, attempt_id = await call_in_progress(session, school, student)
+    llm = ScriptedLlmClient(intent("yes"), intent("answer"), extraction())
+
+    first = await handle_parent_reply(session, attempt_id, "Yes", llm, TODAY)
+    second = await handle_parent_reply(session, attempt_id, "He has fever", llm, TODAY)
+
+    assert first.event_status is None
+    assert second.event_status is None
+    assert event.status == AbsenceEventStatus.DIALING
+    assert event.reason is None
+    assert event.expected_return_date is None
+
+
+async def test_a_confirmed_call_saves_the_result_and_completes_the_event(session, school, student):
+    event, attempt_id = await call_in_progress(session, school, student)
+
+    results = await run_confirmed_call(session, attempt_id)
+    await session.refresh(event)
+
+    assert results[-1].event_status == AbsenceEventStatus.COMPLETED
+    assert event.status == AbsenceEventStatus.COMPLETED
+    assert event.reason == "illness"
+    assert event.expected_return_date == date(2026, 10, 5)
+    assert event.needs_human_followup is False
+    assert event.extraction_prompt_version == "v2"
+    assert event.extracted_at is not None
+
+
+async def test_an_emergency_saves_what_was_learned_and_asks_for_a_person(session, school, student):
+    event, attempt_id = await call_in_progress(session, school, student)
+    llm = ScriptedLlmClient(
+        intent("yes"),
+        intent("answer"),
+        extraction(reason="other", expected_return_date=None, needs_human_followup=True),
+    )
+
+    await handle_parent_reply(session, attempt_id, "Yes", llm, TODAY)
+    result = await handle_parent_reply(session, attempt_id, "He left for school today!", llm, TODAY)
+    await session.refresh(event)
+
+    assert result.outcome == Outcome.ESCALATED
+    assert result.event_status == AbsenceEventStatus.NEEDS_HUMAN
+    assert event.status == AbsenceEventStatus.NEEDS_HUMAN
+    assert event.needs_human_followup is True
+    assert event.reason == "other"
+
+
+@pytest.mark.parametrize("spoken_intent", ["wants_human", "upset", "wrong_person"])
+async def test_these_endings_ask_for_a_person_and_save_no_result(
+    session, school, student, spoken_intent
+):
+    event, attempt_id = await call_in_progress(session, school, student)
+
+    result = await handle_parent_reply(
+        session, attempt_id, "...", ScriptedLlmClient(intent(spoken_intent)), TODAY
+    )
+
+    assert result.event_status == AbsenceEventStatus.NEEDS_HUMAN
+    assert event.status == AbsenceEventStatus.NEEDS_HUMAN
+    assert event.reason is None
+    assert event.extracted_at is None
+
+
+async def test_an_opt_out_flags_the_guardian_and_stops_all_their_calls(session, school, student):
+    event, attempt_id = await call_in_progress(session, school, student)
+    guardian = await session.scalar(select(Guardian))
+    sibling = Student(school_id=school.id, name="Ravi Patil", class_name="3", section="B")
+    session.add(sibling)
+    await session.flush()
+    session.add(
+        StudentGuardian(
+            school_id=school.id, student_id=sibling.id, guardian_id=guardian.id, is_primary=True
+        )
+    )
+    sibling_event = (
+        await mark_attendance(session, school.id, sibling.id, DAY, AttendanceStatus.ABSENT)
+    ).event
+
+    result = await handle_parent_reply(
+        session, attempt_id, "Stop calling me", ScriptedLlmClient(intent("opt_out")), TODAY
+    )
+
+    assert result.event_status == AbsenceEventStatus.NEEDS_HUMAN
+    assert guardian.opted_out is True
+    assert event.status == AbsenceEventStatus.NEEDS_HUMAN
+    # The same parent is never called about their other child either.
+    assert (await start_call(session, sibling_event.id)).result == StartResult.NO_GUARDIAN
+
+
+async def test_call_later_puts_the_event_back_in_the_queue_for_another_attempt(
+    session, school, student
+):
+    event, attempt_id = await call_in_progress(session, school, student)
+
+    result = await handle_parent_reply(
+        session, attempt_id, "Busy now", ScriptedLlmClient(intent("call_later")), TODAY
+    )
+
+    assert result.event_status == AbsenceEventStatus.PENDING
+    assert event.status == AbsenceEventStatus.PENDING
+    second = await start_call(session, event.id)
+    assert second.result == StartResult.STARTED
+    assert (await session.get(CallAttempt, second.call.attempt_id)).attempt_number == 2
+
+
+async def test_a_model_outage_retries_then_asks_for_a_person_at_the_attempt_limit(
+    session, school, student
+):
+    event, attempt_id = await call_in_progress(session, school, student)
+    statuses = []
+    for _ in range(MAX_ATTEMPTS):
+        result = await handle_parent_reply(
+            session, attempt_id, "Yes", ScriptedLlmClient(LlmError("down")), TODAY
+        )
+        statuses.append(result.event_status)
+        if result.event_status == AbsenceEventStatus.PENDING:
+            attempt_id = (await start_call(session, event.id)).call.attempt_id
+
+    assert statuses == [
+        AbsenceEventStatus.PENDING,
+        AbsenceEventStatus.PENDING,
+        AbsenceEventStatus.NEEDS_HUMAN,
+    ]
+    assert event.status == AbsenceEventStatus.NEEDS_HUMAN
+
+
+async def test_the_attempt_limit_can_be_set_for_a_turn(session, school, student):
+    event, attempt_id = await call_in_progress(session, school, student)
+
+    result = await handle_parent_reply(
+        session, attempt_id, "Yes", ScriptedLlmClient(LlmError("down")), TODAY, max_attempts=1
+    )
+
+    assert result.event_status == AbsenceEventStatus.NEEDS_HUMAN
+
+
+async def test_a_failure_while_ending_the_call_leaves_nothing_behind_after_rollback(
+    session, school, student
+):
+    event, attempt_id = await call_in_progress(session, school, student)
+    event_id = event.id  # read now: after a rollback, attributes must be reloaded
+    llm = ScriptedLlmClient(intent("yes"), intent("answer"), extraction(), intent("yes"))
+    await handle_parent_reply(session, attempt_id, "Yes", llm, TODAY)
+    await handle_parent_reply(session, attempt_id, "He has fever", llm, TODAY)
+    await fail_event(session, event_id)  # something else ended the event first
+    await session.commit()
+
+    with pytest.raises(TurnConflictError):
+        await handle_parent_reply(session, attempt_id, "Yes", llm, TODAY)
+    await session.rollback()
+
+    attempt = await session.get(CallAttempt, attempt_id)
+    await session.refresh(attempt)
+    assert attempt.status == CallAttemptStatus.IN_PROGRESS
+    assert attempt.turn_count == 2
+    assert attempt.outcome is None
+    refreshed = await session.get(AbsenceEvent, event_id)
+    await session.refresh(refreshed)
+    assert refreshed.status == AbsenceEventStatus.FAILED
+    assert refreshed.reason is None
+
+
+async def test_ending_a_call_whose_event_was_already_closed_is_refused(session, school, student):
+    event, attempt_id = await call_in_progress(session, school, student)
+    await fail_event(session, event.id)  # something else ended the event first
+
+    with pytest.raises(TurnConflictError):
+        await handle_parent_reply(
+            session, attempt_id, "I want a person", ScriptedLlmClient(intent("wants_human")), TODAY
+        )
