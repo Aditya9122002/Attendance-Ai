@@ -50,7 +50,7 @@ class Extraction(BaseModel):
     )
 
 
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 SYSTEM_PROMPT = """\
 You read a parent's spoken reply, transcribed to text, about why their child was absent from \
@@ -67,14 +67,21 @@ hospital stay.
   transport: the school bus, van or auto did not come or broke down.
   other: any other stated reason, including accidents, injuries, personal work, or the child \
 not wanting to go.
-  not_given: the parent gave no reason, or could not talk.
+  not_given: the parent gave no reason, or could not talk, or told you where the child is \
+instead of why the child was absent (see needs_human_followup).
 - expected_return_date: fill it ONLY when the parent names the return day: a calendar date, a \
 weekday, or a relative day word such as tomorrow, day after tomorrow, kal, parso or udya. \
 Resolve those using today's date, given below. In every other case use null. Never calculate a \
 date from a duration such as "two days of rest" or "a week". Never assume "tomorrow" because \
 of the reason. Use null for vague phrases such as "next week" or "soon".
 - needs_human_followup: true for emergencies, hospital stays, accidents, a death in the family, \
-or a distressed parent. Otherwise false.
+or a distressed parent. ALSO true when the child's whereabouts are in doubt: the parent does \
+not know where the child is, says the child left home for school or is at school, or says \
+someone took the child somewhere without saying where. The school marked this child absent, so \
+these replies mean a mistake or a possible danger, and a person must check. In those cases the \
+parent gave no reason for the absence, so reason is not_given. Do NOT flag a child who is at \
+home, at a doctor, with relatives, or travelling for a stated reason: a known place and a \
+stated reason are normal.
 - Never guess. If something is not stated, use null or not_given.
 """
 

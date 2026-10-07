@@ -16,6 +16,7 @@ from app.call_service import (
     start_call,
 )
 from app.conversation import ConversationState, Outcome, Step
+from app.extraction import PROMPT_VERSION
 from app.llm.base import LlmError
 from app.llm.fake import ScriptedLlmClient
 from app.models import (
@@ -481,7 +482,7 @@ async def test_a_confirmed_call_saves_the_result_and_completes_the_event(session
     assert event.reason == "illness"
     assert event.expected_return_date == date(2026, 10, 5)
     assert event.needs_human_followup is False
-    assert event.extraction_prompt_version == "v2"
+    assert event.extraction_prompt_version == PROMPT_VERSION
     assert event.extracted_at is not None
 
 

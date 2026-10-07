@@ -143,8 +143,8 @@ PHRASES: dict[str, dict[str, str]] = {
             "Thank you, goodbye."
         ),
         "close_emergency": (
-            "I'm sorry to hear that. I'm letting the school know right away so that a person "
-            "can follow up with you. Thank you, goodbye."
+            "Thank you for telling me, and I hope everything is all right. I'm letting the "
+            "school know right away so that a person can follow up with you. Goodbye."
         ),
         "close_incomplete": (
             "Sorry, I'm having trouble understanding. We'll try again later. Goodbye."

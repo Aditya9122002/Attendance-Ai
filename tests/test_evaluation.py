@@ -97,3 +97,18 @@ async def test_holdout_is_well_formed_and_separate_from_the_tuning_set():
     )
     summary = summarize(await run(OracleLlmClient(holdout), holdout))
     assert summary.all_correct_rate == 1.0
+
+
+def test_the_datasets_cover_children_whose_whereabouts_are_in_doubt():
+    for path in (DATASET, HOLDOUT):
+        cases = load_cases(path)
+        doubt = [c for c in cases if "whereabouts" in c.tags]
+        controls = [c for c in cases if "whereabouts_control" in c.tags]
+        assert doubt and controls
+        # Every such reply must reach a person, and none of them is a stated absence reason.
+        assert all(c.needs_human_followup and c.reason == AbsenceReason.NOT_GIVEN for c in doubt)
+        # Normal replies that mention a known place must NOT be flagged.
+        assert not any(c.needs_human_followup for c in controls)
+    main_doubt = [c for c in load_cases(DATASET) if "whereabouts" in c.tags]
+    assert {"en", "hi", "hinglish", "mr"} <= {t for c in main_doubt for t in c.tags}
+    assert any("dispute" in c.tags for c in main_doubt)
