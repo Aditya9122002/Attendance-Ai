@@ -50,7 +50,7 @@ class Extraction(BaseModel):
     )
 
 
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 
 SYSTEM_PROMPT = """\
 You read a parent's spoken reply, transcribed to text, about why their child was absent from \
@@ -73,15 +73,20 @@ instead of why the child was absent (see needs_human_followup).
 weekday, or a relative day word such as tomorrow, day after tomorrow, kal, parso or udya. \
 Resolve those using today's date, given below. In every other case use null. Never calculate a \
 date from a duration such as "two days of rest" or "a week". Never assume "tomorrow" because \
-of the reason. Use null for vague phrases such as "next week" or "soon".
+of the reason. Use null for vague phrases such as "next week" or "soon". Words about today or \
+the past, such as "kept him at home today" or "the bus did not come today", describe the \
+absence and are not a return day.
 - needs_human_followup: true for emergencies, hospital stays, accidents, a death in the family, \
 or a distressed parent. ALSO true when the child's whereabouts are in doubt: the parent does \
 not know where the child is, says the child left home for school or is at school, or says \
 someone took the child somewhere without saying where. The school marked this child absent, so \
-these replies mean a mistake or a possible danger, and a person must check. In those cases the \
-parent gave no reason for the absence, so reason is not_given. Do NOT flag a child who is at \
+these replies mean a mistake or a possible danger, and a person must check. Only for these \
+whereabouts replies is reason not_given: an accident, injury or hospital stay keeps its own \
+reason. Do NOT flag a child who is at \
 home, at a doctor, with relatives, or travelling for a stated reason: a known place and a \
-stated reason are normal.
+stated reason are normal. Do NOT flag a reply that tells you nothing about the child either: \
+the parent cannot hear you, asks who is calling, is busy, or declines to talk. Use not_given \
+and false for those.
 - Never guess. If something is not stated, use null or not_given.
 """
 
