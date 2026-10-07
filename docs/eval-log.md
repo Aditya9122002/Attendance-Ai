@@ -8,6 +8,9 @@ set is run rarely, only to check that prompt changes did not just memorize `main
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-10-02 | gemini-3.1-flash-lite | v1 | main | 89% | 97% | 92% | 100% | 0 | 0 | 1307 / 4513 ms | Baseline. 4 failures: 3 invented return dates where none was stated; accident labelled illness. |
 | 2026-10-02 | gemini-3.1-flash-lite | v2 | main | 97% | 97% | 100% | 100% | 0 | 0 | 2479 / 4173 ms | Baseline. 4 failures: 1 - en-dont-know reply: I don't know, his father took him somewhere. want:  not_given / None / lowup=False : got other/none/followup false |
+| 2026-10-07 | gemini-3.1-flash-lite | v2 | holdout | 100% | 100% | 100% | 100% | 0 | 0 | 1471 / 13043 ms | First holdout run, 16 cases, before prompt v3 and before whereabouts cases were added. No failures. Median is fast but p95 (the slowest single call) is 13 s. |
+| 2026-10-07 | gemini-3.1-flash-lite | v2 | holdout | 100% | 100% | 100% | 100% | 0 | 0 | 1471 / 13043 ms | First holdout run, 16 cases, before prompt v3. No failures. The 13 s p95 is worth watching: Twilio cuts off call requests at 15 s. |
+| 2026-10-07 | gemini-3.1-flash-lite | v3 | main | 92% | 98% | 98% | 96% | 0 | 2 | 1638 / 16424 ms | 48 cases (12 new whereabouts cases and controls; en-dont-know relabelled to need follow-up). 4 failures: en-who and en-later were false alarms, because the v3 wording over-triggered on non-answers; en-accident got reason not_given instead of other; en-missed-bus invented return date 2026-10-03. All 8 whereabouts cases passed. |
 
 ## Intent classifier
 
