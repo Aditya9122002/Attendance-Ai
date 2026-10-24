@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from app.config import get_settings
 from app.database import create_engine, create_session_factory
 from app.logging_config import configure_logging
-from app.routers import attendance
+from app.routers import attendance, twilio_voice
 
 APP_VERSION = "0.1.0"
 
@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="AttendanceAI", version=APP_VERSION, lifespan=lifespan)
 app.include_router(attendance.router)
+app.include_router(twilio_voice.router)
 
 
 @app.get("/health", response_model=HealthResponse)

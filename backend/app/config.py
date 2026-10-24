@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.1-flash-lite"
     database_url: str = "sqlite+aiosqlite:///./attendance.db"
+    # Telephony. All optional: the app runs without them, the phone routes then refuse to serve.
+    twilio_account_sid: str | None = None
+    twilio_auth_token: SecretStr | None = None
+    twilio_from_number: str | None = None  # a Twilio number, E.164, for example +1415...
+    public_base_url: str | None = None  # where Twilio reaches us, e.g. https://abc.ngrok-free.app
 
 
 @lru_cache
